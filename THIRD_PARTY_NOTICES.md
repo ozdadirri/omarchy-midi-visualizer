@@ -10,7 +10,8 @@ One sample per minor third (A0–C8), the same reduced set used by the web
 version at https://midi.dadirri.org/. Neighbouring pitches are produced by
 resampling at playback time.
 
-## Bundled demo songs
+---
 
-`assets/samples/*.mid` are included as demo content, carried over from the
-web version's sample set.
+The bundled demo songs `assets/samples/*.mid` are original compositions by
+ozdadirri and are covered by this project's own licence (see `LICENSE`), not by
+any third party.

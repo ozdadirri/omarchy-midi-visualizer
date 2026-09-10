@@ -94,6 +94,8 @@ quickshell -p standalone.qml            # run the app build directly
 
 ## Licensing
 
-Plugin code: MIT (see `LICENSE`). The piano samples in `assets/samples/piano/`
-are from the Salamander Grand Piano V3 by Alexander Holm, CC-BY 3.0 — see
-`THIRD_PARTY_NOTICES.md`.
+Plugin code and the bundled demo songs (`assets/samples/*.mid`, original
+compositions by ozdadirri): MIT — see `LICENSE`.
+
+The piano samples in `assets/samples/piano/` are from the Salamander Grand Piano
+V3 by Alexander Holm, CC-BY 3.0 — see `THIRD_PARTY_NOTICES.md`.
