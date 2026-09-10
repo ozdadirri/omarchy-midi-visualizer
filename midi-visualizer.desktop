@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=MIDI Visualizer
+Comment=Synthesia-style falling-note MIDI visualizer (standalone window)
+Exec=sh -c 'exec quickshell -p "$HOME/.config/omarchy/plugins/ozdadirri.midiviz/standalone.qml"'
+Icon=multimedia-audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=midi;piano;synthesia;visualizer;
+StartupNotify=false

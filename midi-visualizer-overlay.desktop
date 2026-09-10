@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=MIDI Visualizer (Overlay)
+Comment=Toggle the fullscreen MIDI visualizer overlay
+Exec=omarchy-shell shell toggle ozdadirri.midiviz {}
+Icon=multimedia-audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=midi;piano;synthesia;visualizer;overlay;
+StartupNotify=false

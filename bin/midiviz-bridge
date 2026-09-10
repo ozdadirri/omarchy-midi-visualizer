@@ -15,10 +15,11 @@ stdin  (overlay -> bridge), one JSON object per line:
     {"cmd": "seek", "t": 12.5}
     {"cmd": "speed", "v": 1.0}      # schedule time-stretch only, pitch unchanged
     {"cmd": "volume", "v": 0.7}     # 0..1 master gain
+    {"cmd": "instrument", "name": "Grand Piano"}   # one of the "ready" list
     {"cmd": "quit"}
 
 stdout (bridge -> overlay), one JSON object per line:
-    {"ev": "ready"}
+    {"ev": "ready", "instruments": [...], "instrument": "Grand Piano"}
     {"ev": "loaded", "duration": 123.4, "tracks": 3,
      "notes": [[midi, time, dur, vel, track], ...]}   # vel 0..1, times in seconds
     {"ev": "time", "t": 12.34, "playing": true}       # ~40/s while loaded
@@ -29,8 +30,10 @@ Requirements: python3, numpy (`omarchy pkg add python-numpy`), ffmpeg, pw-play.
 The sample decode uses ffmpeg; everything else is stdlib + numpy.
 """
 
+import atexit
 import json
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -43,6 +46,26 @@ CHANNELS = 2
 RELEASE_S = 0.30                 # damper fade when a note ends (matches the web app)
 ATTACK_S = 0.004
 MAX_VOICES = 64
+
+# Selectable instruments. "sample" uses the recorded grand piano; the rest are
+# lightweight additive-synth voices (no sample packs needed). A/D/S/R in
+# seconds; `partials` are (harmonic multiple, amplitude) pairs.
+INSTRUMENTS = {
+    "Grand Piano":    {"kind": "sample"},
+    "Electric Piano": {"kind": "synth", "partials": [(1, 1.0), (2, 0.35), (4, 0.12)],
+                       "A": 0.004, "D": 2.2, "S": 0.0, "R": 0.30, "gain": 0.50},
+    "Music Box":      {"kind": "synth", "partials": [(1, 1.0), (3, 0.30), (5, 0.12), (7, 0.05)],
+                       "A": 0.002, "D": 1.2, "S": 0.0, "R": 0.20, "gain": 0.42},
+    "Pipe Organ":     {"kind": "synth", "partials": [(1, 1.0), (2, 0.7), (3, 0.5), (4, 0.35), (6, 0.2)],
+                       "A": 0.02, "D": 0.12, "S": 0.92, "R": 0.18, "gain": 0.30},
+    "Synth Pad":      {"kind": "synth", "partials": [(1, 1.0), (2, 0.5), (3, 0.33), (4, 0.25), (5, 0.2)],
+                       "A": 0.35, "D": 0.4, "S": 0.80, "R": 0.70, "gain": 0.26},
+    "Pluck":          {"kind": "synth", "partials": [(1, 1.0), (2, 0.5), (3, 0.3), (4, 0.15)],
+                       "A": 0.002, "D": 0.85, "S": 0.0, "R": 0.15, "gain": 0.50},
+    "Sine":           {"kind": "synth", "partials": [(1, 1.0)],
+                       "A": 0.01, "D": 0.0, "S": 1.0, "R": 0.25, "gain": 0.50},
+}
+DEFAULT_INSTRUMENT = "Grand Piano"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_DIR = os.path.join(HERE, "..", "assets", "samples", "piano")
@@ -232,23 +255,44 @@ class Sampler:
         self.roots = sorted(self.samples)
         if not self.roots:
             raise RuntimeError("no piano samples decoded from %s" % SAMPLE_DIR)
-        self.voices = []           # dicts: buf, pos, rate, gain, rel, rel_left, done_at
+        self.voices = []           # sample or synth voice dicts (see note_on)
         self.lock = threading.Lock()
+        self.instrument = DEFAULT_INSTRUMENT
+
+    def set_instrument(self, name):
+        if name in INSTRUMENTS:
+            self.instrument = name
 
     def _root_for(self, midi):
         return min(self.roots, key=lambda r: abs(r - midi))
 
     def note_on(self, midi, vel):
-        root = self._root_for(midi)
-        v = {
-            "buf": self.samples[root],
-            "pos": 0.0,
-            "rate": 2.0 ** ((midi - root) / 12.0),
-            "gain": max(0.05, vel) * 0.9,
-            "atk": 0.0,
-            "rel": False,
-            "rel_gain": 1.0,
-        }
+        spec = INSTRUMENTS.get(self.instrument, INSTRUMENTS[DEFAULT_INSTRUMENT])
+        if spec["kind"] == "sample":
+            root = self._root_for(midi)
+            v = {
+                "kind": "sample",
+                "buf": self.samples[root],
+                "pos": 0.0,
+                "rate": 2.0 ** ((midi - root) / 12.0),
+                "gain": max(0.05, vel) * 0.9,
+                "atk": 0.0,
+                "rel": False,
+                "rel_gain": 1.0,
+            }
+        else:
+            freq = 440.0 * (2.0 ** ((midi - 69) / 12.0))
+            v = {
+                "kind": "synth",
+                "w": 2.0 * 3.141592653589793 * freq / SR,   # rad / sample
+                "phase": 0.0,
+                "partials": spec["partials"],
+                "pnorm": sum(a for _, a in spec["partials"]),
+                "gain": max(0.05, vel) * spec.get("gain", 0.5),
+                "A": spec["A"], "D": spec["D"], "S": spec["S"], "R": spec["R"],
+                "env": 0.0, "stage": 0,        # 0 attack, 1 decay, 2 sustain
+                "rel": False,
+            }
         with self.lock:
             if len(self.voices) >= MAX_VOICES:
                 self.voices.pop(0)
@@ -261,40 +305,81 @@ class Sampler:
     def render(self, frames):
         np = self.np
         out = np.zeros(frames, dtype=np.float32)
-        atk_step = 1.0 / (ATTACK_S * SR)
-        rel_step = 1.0 / (RELEASE_S * SR)
+        k = np.arange(frames, dtype=np.float64)
         with self.lock:
             live = []
             for v in self.voices:
-                buf = v["buf"]
-                idx = v["pos"] + np.arange(frames, dtype=np.float64) * v["rate"]
-                keep = idx < len(buf) - 1
-                if not keep.any():
-                    continue
-                seg = np.interp(idx, np.arange(len(buf)), buf).astype(np.float32)
-
-                # attack ramp
-                if v["atk"] < 1.0:
-                    ramp = v["atk"] + atk_step * np.arange(frames)
-                    np.clip(ramp, 0.0, 1.0, out=ramp)
-                    seg *= ramp.astype(np.float32)
-                    v["atk"] = min(1.0, v["atk"] + atk_step * frames)
-
-                # release ramp
-                if v["rel"]:
-                    ramp = v["rel_gain"] - rel_step * np.arange(frames)
-                    np.clip(ramp, 0.0, 1.0, out=ramp)
-                    seg *= ramp.astype(np.float32)
-                    v["rel_gain"] = max(0.0, v["rel_gain"] - rel_step * frames)
-
-                out[:len(seg)] += seg * v["gain"]
-                v["pos"] += frames * v["rate"]
-                if v["rel"] and v["rel_gain"] <= 0.0:
-                    continue
-                if idx[-1] < len(buf) - 1:
+                if v["kind"] == "sample":
+                    keep = self._render_sample(v, frames, k, out)
+                else:
+                    keep = self._render_synth(v, frames, k, out)
+                if keep:
                     live.append(v)
             self.voices = live
         return out
+
+    def _render_sample(self, v, frames, k, out):
+        np = self.np
+        atk_step = 1.0 / (ATTACK_S * SR)
+        rel_step = 1.0 / (RELEASE_S * SR)
+        buf = v["buf"]
+        n = buf.shape[0]
+        idx = v["pos"] + k * v["rate"]
+        valid = int(np.searchsorted(idx, n - 1.001, side="left"))
+        if valid > 0:
+            si = idx[:valid]
+            i0 = si.astype(np.int64)
+            frac = (si - i0).astype(np.float32)
+            seg = buf[i0] * (1.0 - frac) + buf[i0 + 1] * frac        # O(frames) interp
+            kk = k[:valid].astype(np.float32)
+            if v["atk"] < 1.0:
+                ramp = np.clip(v["atk"] + atk_step * kk, 0.0, 1.0)
+                seg *= ramp
+                v["atk"] = min(1.0, v["atk"] + atk_step * valid)
+            if v["rel"]:
+                ramp = np.clip(v["rel_gain"] - rel_step * kk, 0.0, 1.0)
+                seg *= ramp
+                v["rel_gain"] = max(0.0, v["rel_gain"] - rel_step * valid)
+            out[:valid] += seg * v["gain"]
+        v["pos"] += frames * v["rate"]
+        if v["rel"] and v["rel_gain"] <= 0.0:
+            return False
+        return v["pos"] < n - 1
+
+    def _render_synth(self, v, frames, k, out):
+        np = self.np
+        A, D, S, R = v["A"], v["D"], v["S"], v["R"]
+        env0, stage = v["env"], v["stage"]
+        if v["rel"]:
+            env1 = max(0.0, env0 - (frames / SR) / max(R, 1e-4))
+        elif stage == 0:
+            env1 = min(1.0, env0 + (frames / SR) / max(A, 1e-4))
+        elif stage == 1:
+            env1 = max(S, env0 - (1.0 - S) * (frames / SR) / max(D, 1e-4))
+        else:
+            env1 = S
+        envramp = np.linspace(env0, env1, frames, endpoint=False)
+        if not v["rel"]:
+            if stage == 0 and env1 >= 1.0:
+                v["stage"] = 1
+            elif stage == 1 and env1 <= S:
+                v["stage"] = 2
+        v["env"] = env1
+
+        w = v["w"]
+        ph = v["phase"] + k * w
+        sig = np.zeros(frames)
+        for mult, amp in v["partials"]:
+            sig += amp * np.sin(ph * mult)
+        sig *= (v["gain"] / v["pnorm"]) * envramp
+        out += sig.astype(np.float32)
+        v["phase"] = (v["phase"] + frames * w) % (2.0 * 3.141592653589793)
+
+        if v["rel"] and env1 <= 1e-4:
+            return False
+        if v["stage"] == 2 and S <= 0.0:
+            return False
+        return True
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +406,21 @@ class Engine:
             ["pw-play", "--raw", "--format=f32", "--rate=%d" % SR,
              "--channels=%d" % CHANNELS, "--latency=50ms", "-"],
             stdin=subprocess.PIPE)
+        atexit.register(self._stop_pw)
+
+    def _stop_pw(self):
+        pw = self.pw
+        self.pw = None
+        if pw and pw.poll() is None:
+            try:
+                pw.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                pw.terminate()
+                pw.wait(timeout=1)
+            except Exception:  # noqa: BLE001
+                pw.kill()
 
     # ---- commands -------------------------------------------------------- #
     def load(self, path):
@@ -361,6 +461,10 @@ class Engine:
     def set_volume(self, v):
         with self.lock:
             self.volume = max(0.0, min(1.0, v))
+
+    def set_instrument(self, name):
+        with self.lock:
+            self.sampler.set_instrument(name)
 
     def _all_off_locked(self):
         for _off, voice in self.active:
@@ -412,6 +516,11 @@ class Engine:
 
 # --------------------------------------------------------------------------- #
 def main():
+    # Turn SIGTERM / SIGHUP (sent when the host window or shell goes away) into a
+    # clean exit so the atexit hook stops pw-play -- otherwise audio keeps going.
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, lambda *_: sys.exit(0))
+
     try:
         import numpy  # noqa: F401
     except ImportError:
@@ -422,9 +531,10 @@ def main():
     except Exception as exc:  # noqa: BLE001
         emit({"ev": "error", "msg": str(exc)})
         return
-    emit({"ev": "ready"})
+    emit({"ev": "ready", "instruments": list(INSTRUMENTS.keys()),
+          "instrument": DEFAULT_INSTRUMENT})
 
-    for line in sys.stdin:
+    for line in sys.stdin:            # ends on EOF when the host closes our stdin
         line = line.strip()
         if not line:
             continue
@@ -446,6 +556,8 @@ def main():
                 engine.set_speed(float(msg["v"]))
             elif cmd == "volume":
                 engine.set_volume(float(msg["v"]))
+            elif cmd == "instrument":
+                engine.set_instrument(msg["name"])
             elif cmd == "quit":
                 break
         except Exception as exc:  # noqa: BLE001

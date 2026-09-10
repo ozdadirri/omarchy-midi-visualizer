@@ -21,6 +21,10 @@ QtObject {
     property real playhead: 0
     property bool playing: false
 
+    // Instrument list / selection, from the "ready" event.
+    property var instruments: ["Grand Piano"]
+    property string instrument: "Grand Piano"
+
     signal loaded()
     signal ended()
     signal failed(string message)
@@ -35,9 +39,25 @@ QtObject {
         if (proc.running) proc.signal(15);
     }
 
+    // Commands issued before the bridge finishes booting are queued and
+    // flushed once it emits "ready".
+    property var _queue: []
+
     function _send(obj) {
-        if (!proc.running) return;
-        proc.write(JSON.stringify(obj) + "\n");
+        if (proc.running && root.ready) {
+            proc.write(JSON.stringify(obj) + "\n");
+        } else {
+            var q = root._queue.slice();
+            q.push(obj);
+            root._queue = q;
+        }
+    }
+
+    function _flush() {
+        var q = root._queue;
+        root._queue = [];
+        for (var i = 0; i < q.length; i++)
+            proc.write(JSON.stringify(q[i]) + "\n");
     }
 
     function load(path)   { _send({ cmd: "load", path: path }); }
@@ -46,6 +66,7 @@ QtObject {
     function seek(t)      { _send({ cmd: "seek", t: t }); }
     function setSpeed(v)  { _send({ cmd: "speed", v: v }); }
     function setVolume(v) { _send({ cmd: "volume", v: v }); }
+    function setInstrument(name) { root.instrument = name; _send({ cmd: "instrument", name: name }); }
 
     property Process proc: Process {
         command: [root.executable]
@@ -57,7 +78,10 @@ QtObject {
                 try { msg = JSON.parse(line); } catch (e) { return; }
                 switch (msg.ev) {
                 case "ready":
+                    if (msg.instruments) root.instruments = msg.instruments;
+                    if (msg.instrument) root.instrument = msg.instrument;
                     root.ready = true;
+                    root._flush();
                     break;
                 case "loaded":
                     root.notes = msg.notes;

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "dadirri.midiviz",
+  "id": "ozdadirri.midiviz",
   "name": "MIDI Visualizer",
   "version": "0.1.0",
-  "author": "dadirri",
+  "author": "ozdadirri",
   "license": "MIT",
   "description": "Synthesia-style falling-note MIDI visualizer with a real sampled grand piano. Load a .mid file and watch glowing bars fall onto an 88-key keyboard.",
   "kinds": ["overlay"],

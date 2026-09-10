@@ -15,37 +15,44 @@ the [web version](https://midi.dadirri.org/)).
 
 ## Requirements
 
-Installed via your package manager, not by the plugin:
+`python3`, `pw-play` (PipeWire), `ffmpeg` and `quickshell` all ship with a
+standard Omarchy install. The only extra is **`python-numpy`** (the real-time
+mixer). `install.sh` checks for anything missing and offers to install it, so
+you normally don't need to do this by hand — but if you prefer:
 
 ```bash
-omarchy pkg add python-numpy ffmpeg
+omarchy pkg add python-numpy
 ```
-
-`python3`, `pw-play` (PipeWire) and `ffmpeg` are expected on a standard Omarchy
-install; `python-numpy` powers the real-time mixer.
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/dadirri/omarchy-midi-visualizer.git --enable
-~/.config/omarchy/plugins/dadirri.midiviz/install.sh
+omarchy plugin add https://github.com/ozdadirri/omarchy-midi-visualizer.git --enable
+~/.config/omarchy/plugins/ozdadirri.midiviz/install.sh both
 ```
 
-`install.sh` adds a `SUPER + SHIFT + M` binding (with a `bindings.lua` backup and
-a guard against clobbering an existing shortcut). You can also summon it directly:
+`install.sh [overlay|app|both] [--with-deps]` — `both` (default) installs the
+Omarchy overlay *and* the standalone window app. It adds a `SUPER + ALT + M`
+binding (with a `bindings.lua` backup and a guard against clobbering an existing
+shortcut), drops app-menu entries, and (with `--with-deps`, or by prompting in a
+terminal) installs any missing packages. You can also summon the overlay
+directly:
 
 ```bash
-omarchy-shell shell toggle dadirri.midiviz '{}'
+omarchy-shell shell toggle ozdadirri.midiviz '{}'
 ```
 
-Pass a file to open on launch: `omarchy-shell shell toggle dadirri.midiviz '{"path":"/abs/song.mid"}'`.
+Pass a file to open on launch: `omarchy-shell shell toggle ozdadirri.midiviz '{"path":"/abs/song.mid"}'`.
 
 ## Use
 
-- `SUPER + SHIFT + M` — show / hide
+- Launch **“MIDI Visualizer”** from the app menu, or `SUPER + ALT + M` — show / hide
 - `Space` — play / pause
-- `Esc` — dismiss
+- `Esc` — dismiss (or the header **✕ Close** button)
+- **Load MIDI…** (or `Ctrl+O`) — browse the filesystem for any `.mid` / `.midi`
+  file (folder navigation, quick-links, or type an absolute path)
 - Header combo box — load a bundled sample song
+- **↻ Restart** — jump back to the start
 - "Split hands" — colour notes by hand (split at middle C)
 - Transport bar — seek, playback speed, volume
 
@@ -64,8 +71,8 @@ full protocol.
 
 ## Not yet ported from the web app
 
-Video export, custom background image upload, arbitrary-file picker (only bundled
-samples for now), per-track colour pickers, custom sample packs.
+Video export, custom background image upload, per-track colour pickers, custom
+sample packs.
 
 ## Develop
 
