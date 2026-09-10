@@ -5,6 +5,8 @@ A Synthesia-style piano visualizer as a native Omarchy (Quattro) overlay. Load a
 through a real sampled grand piano (the Salamander Grand Piano recordings from
 the [web version](https://midi.dadirri.org/)).
 
+![MIDI Visualizer — falling notes over an 88-key keyboard](preview.png)
+
 > Status: **early scaffold (v0.1.0)**. The audio bridge parses MIDI, mixes the
 > sampled piano and reports the playhead; the QML overlay is wired but still
 > needs on-device iteration against a running Omarchy shell.
