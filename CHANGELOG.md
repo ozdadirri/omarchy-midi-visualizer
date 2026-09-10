@@ -29,8 +29,8 @@
 - Plugin id `dadirri.midiviz` → `ozdadirri.midiviz`; fixed the GitHub URL.
 - The bridge starts only when a song is loaded and is fully stopped (with its
   `pw-play`) when the overlay closes or the window quits — nothing runs idle.
-- `install.sh` never installs packages or uses sudo; it only reports a missing
-  dependency and prints the `omarchy pkg add` command.
+- `install.sh` never installs software or uses sudo; it only names a missing
+  dependency package.
 
 ### Fixed
 

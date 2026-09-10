@@ -7,8 +7,8 @@
 #   ./install.sh both
 #
 # This script only edits your own config (bindings.lua, ~/.local). It never
-# installs packages or uses sudo -- if a runtime dependency is missing it prints
-# the `omarchy pkg add` command for you to run. Safe to re-run.
+# installs software or uses sudo -- if a runtime dependency is missing it just
+# names the package so you can install it yourself. Safe to re-run.
 set -euo pipefail
 
 mode="both"
@@ -47,7 +47,8 @@ python3 -c 'import numpy' 2>/dev/null || missing_pkgs+=(python-numpy)
 if $want_app && ! command -v quickshell >/dev/null; then missing_pkgs+=(quickshell); fi
 
 if ((${#missing_pkgs[@]})); then
-  printf 'Missing runtime dependency. Run:\n  omarchy pkg add %s\n' "${missing_pkgs[*]}" >&2
+  printf 'Missing runtime dependency: install these packages yourself: %s\n' \
+    "${missing_pkgs[*]}" >&2
 fi
 
 mkdir -p "$apps_dir"

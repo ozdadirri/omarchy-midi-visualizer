@@ -20,15 +20,11 @@ keybinding, or as a **standalone window app**. Same visualizer, your choice.
 ## Requirements
 
 `python3`, `pw-play` (PipeWire), `ffmpeg` and `quickshell` ship with a standard
-Omarchy install. The one extra is **`python-numpy`**, which powers the real-time
-mixer:
+Omarchy install. The one extra is the **`python-numpy`** package, which powers
+the real-time mixer — install it with your usual package manager.
 
-```bash
-omarchy pkg add python-numpy
-```
-
-`install.sh` checks for it (and everything else) and prints the exact command if
-anything is missing — it never installs packages for you.
+`install.sh` only checks for the dependencies and names anything missing; it
+never installs software itself.
 
 ## Install
 

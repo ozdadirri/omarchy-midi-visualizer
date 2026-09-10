@@ -26,7 +26,7 @@ stdout (bridge -> overlay), one JSON object per line:
     {"ev": "end"}
     {"ev": "error", "msg": "..."}
 
-Requirements: python3, numpy (`omarchy pkg add python-numpy`), ffmpeg, pw-play.
+Requirements: python3, numpy (the "python-numpy" package), ffmpeg, pw-play.
 The sample decode uses ffmpeg; everything else is stdlib + numpy.
 """
 
@@ -524,7 +524,7 @@ def main():
     try:
         import numpy  # noqa: F401
     except ImportError:
-        emit({"ev": "error", "msg": "python-numpy is required: omarchy pkg add python-numpy"})
+        emit({"ev": "error", "msg": "the python-numpy package is required but not installed"})
         return
     try:
         engine = Engine()
