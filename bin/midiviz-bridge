@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""MIDI Visualizer audio + clock bridge.
+
+One long-running process, driven by the Quickshell overlay over stdio with
+newline-delimited JSON. It owns the single timeline: it parses the MIDI file,
+plays it through a small sampled-piano mixer to `pw-play`, and reports the
+playhead back so the falling notes stay locked to the audio.
+
+Protocol
+--------
+stdin  (overlay -> bridge), one JSON object per line:
+    {"cmd": "load", "path": "/abs/path/to/song.mid"}
+    {"cmd": "play"}
+    {"cmd": "pause"}
+    {"cmd": "seek", "t": 12.5}
+    {"cmd": "speed", "v": 1.0}      # schedule time-stretch only, pitch unchanged
+    {"cmd": "volume", "v": 0.7}     # 0..1 master gain
+    {"cmd": "quit"}
+
+stdout (bridge -> overlay), one JSON object per line:
+    {"ev": "ready"}
+    {"ev": "loaded", "duration": 123.4, "tracks": 3,
+     "notes": [[midi, time, dur, vel, track], ...]}   # vel 0..1, times in seconds
+    {"ev": "time", "t": 12.34, "playing": true}       # ~40/s while loaded
+    {"ev": "end"}
+    {"ev": "error", "msg": "..."}
+
+Requirements: python3, numpy (`omarchy pkg add python-numpy`), ffmpeg, pw-play.
+The sample decode uses ffmpeg; everything else is stdlib + numpy.
+"""
+
+import json
+import os
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+SR = 44100
+BLOCK = 1024                     # frames per mixed block (~23 ms)
+CHANNELS = 2
+RELEASE_S = 0.30                 # damper fade when a note ends (matches the web app)
+ATTACK_S = 0.004
+MAX_VOICES = 64
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SAMPLE_DIR = os.path.join(HERE, "..", "assets", "samples", "piano")
+
+# One sample per minor third, A0..C8 -- the set shipped with the web app.
+SAMPLE_NAMES = ["A0", "C1", "Ds1", "Fs1", "A1", "C2", "Ds2", "Fs2", "A2",
+                "C3", "Ds3", "Fs3", "A3", "C4", "Ds4", "Fs4", "A4", "C5",
+                "Ds5", "Fs5", "A5", "C6", "Ds6", "Fs6", "A6", "C7", "Ds7",
+                "Fs7", "A7", "C8"]
+_PC = {"C": 0, "Cs": 1, "D": 2, "Ds": 3, "E": 4, "F": 5,
+       "Fs": 6, "G": 7, "Gs": 8, "A": 9, "As": 10, "B": 11}
+
+
+def log(msg):
+    sys.stderr.write("[midiviz-bridge] %s\n" % msg)
+    sys.stderr.flush()
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def name_to_midi(name):
+    pc = _PC[name[:-1]]
+    octave = int(name[-1])
+    return (octave + 1) * 12 + pc
+
+
+# --------------------------------------------------------------------------- #
+# Minimal Standard MIDI File parser (format 0/1), notes only.
+# --------------------------------------------------------------------------- #
+class MidiParseError(Exception):
+    pass
+
+
+def _read_varlen(data, i):
+    val = 0
+    while True:
+        b = data[i]
+        i += 1
+        val = (val << 7) | (b & 0x7F)
+        if not b & 0x80:
+            return val, i
+
+
+def parse_midi(path):
+    """Return (notes, duration). notes: list of [midi, start, dur, vel, track]."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:4] != b"MThd":
+        raise MidiParseError("not a MIDI file (missing MThd)")
+    (_hlen,) = struct.unpack(">I", data[4:8])
+    fmt, ntrk, division = struct.unpack(">HHH", data[8:14])
+    if division & 0x8000:
+        raise MidiParseError("SMPTE time division is not supported")
+    ticks_per_beat = division
+    pos = 8 + _hlen
+
+    # Gather (abs_tick, us_per_beat) tempo changes across every track first.
+    raw_tracks = []
+    p = pos
+    for _ in range(ntrk):
+        if data[p:p + 4] != b"MTrk":
+            raise MidiParseError("expected MTrk")
+        (tlen,) = struct.unpack(">I", data[p + 4:p + 8])
+        body = data[p + 8:p + 8 + tlen]
+        raw_tracks.append(body)
+        p += 8 + tlen
+
+    # (abs_tick, microseconds per quarter note); 120 bpm until the first change.
+    tempo_map = []
+    for body in raw_tracks:
+        i, tick, status = 0, 0, 0
+        while i < len(body):
+            dt, i = _read_varlen(body, i)
+            tick += dt
+            b = body[i]
+            if b & 0x80:
+                status = b
+                i += 1
+            if status == 0xFF:
+                meta = body[i]
+                i += 1
+                mlen, i = _read_varlen(body, i)
+                if meta == 0x51 and mlen == 3:
+                    tempo_map.append((tick, struct.unpack(">I", b"\x00" + body[i:i + 3])[0]))
+                i += mlen
+            elif status in (0xF0, 0xF7):
+                slen, i = _read_varlen(body, i)
+                i += slen
+            else:
+                i += 1 if 0xC0 <= status <= 0xDF else 2
+    tempo_map.sort()
+
+    def tick_to_seconds(target):
+        secs, last_tick, us = 0.0, 0, 500000
+        for t_tick, t_us in tempo_map:
+            if t_tick >= target:
+                break
+            secs += (t_tick - last_tick) * us / 1e6 / ticks_per_beat
+            last_tick, us = t_tick, t_us
+        secs += (target - last_tick) * us / 1e6 / ticks_per_beat
+        return secs
+
+    notes = []
+    track_idx = 0
+    for body in raw_tracks:
+        i, tick, status = 0, 0, 0
+        pending = {}  # (chan, key) -> (start_tick, vel)
+        had_note = False
+        while i < len(body):
+            dt, i = _read_varlen(body, i)
+            tick += dt
+            b = body[i]
+            if b & 0x80:
+                status = b
+                i += 1
+            hi, chan = status & 0xF0, status & 0x0F
+            if hi == 0x90:
+                key, vel = body[i], body[i + 1]
+                i += 2
+                if vel > 0:
+                    pending[(chan, key)] = (tick, vel)
+                    had_note = True
+                else:
+                    _close_note(notes, pending, chan, key, tick, track_idx, tick_to_seconds)
+            elif hi == 0x80:
+                key = body[i]
+                i += 2
+                _close_note(notes, pending, chan, key, tick, track_idx, tick_to_seconds)
+            elif hi in (0xA0, 0xB0, 0xE0):
+                i += 2
+            elif hi in (0xC0, 0xD0):
+                i += 1
+            elif status == 0xFF:
+                i += 1
+                mlen, i = _read_varlen(body, i)
+                i += mlen
+            elif status in (0xF0, 0xF7):
+                slen, i = _read_varlen(body, i)
+                i += slen
+            else:
+                i += 1
+        # flush notes left hanging at end of track
+        for (chan, key), (st, vel) in list(pending.items()):
+            _emit_note(notes, st, tick, key, vel, track_idx, tick_to_seconds)
+        if had_note:
+            track_idx += 1
+    notes.sort(key=lambda n: n[1])
+    duration = max((n[1] + n[2] for n in notes), default=0.0)
+    return notes, duration
+
+
+def _close_note(notes, pending, chan, key, tick, track_idx, t2s):
+    entry = pending.pop((chan, key), None)
+    if entry is not None:
+        _emit_note(notes, entry[0], tick, key, entry[1], track_idx, t2s)
+
+
+def _emit_note(notes, start_tick, end_tick, key, vel, track_idx, t2s):
+    start = t2s(start_tick)
+    end = t2s(end_tick)
+    notes.append([int(key), round(start, 4), round(max(end - start, 0.02), 4),
+                  round(vel / 127.0, 3), track_idx])
+
+
+# --------------------------------------------------------------------------- #
+# Sampled-piano mixer
+# --------------------------------------------------------------------------- #
+class Sampler:
+    def __init__(self):
+        import numpy as np
+        self.np = np
+        self.samples = {}          # root_midi -> float32 mono array
+        self.roots = []
+        for nm in SAMPLE_NAMES:
+            path = os.path.join(SAMPLE_DIR, nm + ".mp3")
+            if not os.path.exists(path):
+                continue
+            pcm = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", path,
+                 "-f", "f32le", "-acodec", "pcm_f32le",
+                 "-ac", "1", "-ar", str(SR), "-"],
+                capture_output=True, check=True).stdout
+            self.samples[name_to_midi(nm)] = np.frombuffer(pcm, dtype="<f4").copy()
+        self.roots = sorted(self.samples)
+        if not self.roots:
+            raise RuntimeError("no piano samples decoded from %s" % SAMPLE_DIR)
+        self.voices = []           # dicts: buf, pos, rate, gain, rel, rel_left, done_at
+        self.lock = threading.Lock()
+
+    def _root_for(self, midi):
+        return min(self.roots, key=lambda r: abs(r - midi))
+
+    def note_on(self, midi, vel):
+        root = self._root_for(midi)
+        v = {
+            "buf": self.samples[root],
+            "pos": 0.0,
+            "rate": 2.0 ** ((midi - root) / 12.0),
+            "gain": max(0.05, vel) * 0.9,
+            "atk": 0.0,
+            "rel": False,
+            "rel_gain": 1.0,
+        }
+        with self.lock:
+            if len(self.voices) >= MAX_VOICES:
+                self.voices.pop(0)
+            self.voices.append(v)
+        return v
+
+    def release(self, voice):
+        voice["rel"] = True
+
+    def render(self, frames):
+        np = self.np
+        out = np.zeros(frames, dtype=np.float32)
+        atk_step = 1.0 / (ATTACK_S * SR)
+        rel_step = 1.0 / (RELEASE_S * SR)
+        with self.lock:
+            live = []
+            for v in self.voices:
+                buf = v["buf"]
+                idx = v["pos"] + np.arange(frames, dtype=np.float64) * v["rate"]
+                keep = idx < len(buf) - 1
+                if not keep.any():
+                    continue
+                seg = np.interp(idx, np.arange(len(buf)), buf).astype(np.float32)
+
+                # attack ramp
+                if v["atk"] < 1.0:
+                    ramp = v["atk"] + atk_step * np.arange(frames)
+                    np.clip(ramp, 0.0, 1.0, out=ramp)
+                    seg *= ramp.astype(np.float32)
+                    v["atk"] = min(1.0, v["atk"] + atk_step * frames)
+
+                # release ramp
+                if v["rel"]:
+                    ramp = v["rel_gain"] - rel_step * np.arange(frames)
+                    np.clip(ramp, 0.0, 1.0, out=ramp)
+                    seg *= ramp.astype(np.float32)
+                    v["rel_gain"] = max(0.0, v["rel_gain"] - rel_step * frames)
+
+                out[:len(seg)] += seg * v["gain"]
+                v["pos"] += frames * v["rate"]
+                if v["rel"] and v["rel_gain"] <= 0.0:
+                    continue
+                if idx[-1] < len(buf) - 1:
+                    live.append(v)
+            self.voices = live
+        return out
+
+
+# --------------------------------------------------------------------------- #
+# Engine: timeline + playback thread
+# --------------------------------------------------------------------------- #
+class Engine:
+    def __init__(self):
+        self.sampler = Sampler()
+        self.lock = threading.Lock()
+        self.notes = []            # [midi, start, dur, vel, track]
+        self.duration = 0.0
+        self.playing = False
+        self.song_t = 0.0
+        self.speed = 1.0
+        self.volume = 0.7
+        self.cursor = 0            # index of next note to trigger
+        self.active = []           # (off_time, voice)
+        self.pw = None
+        self._start_pw()
+        threading.Thread(target=self._audio_loop, daemon=True).start()
+
+    def _start_pw(self):
+        self.pw = subprocess.Popen(
+            ["pw-play", "--raw", "--format=f32", "--rate=%d" % SR,
+             "--channels=%d" % CHANNELS, "--latency=50ms", "-"],
+            stdin=subprocess.PIPE)
+
+    # ---- commands -------------------------------------------------------- #
+    def load(self, path):
+        notes, duration = parse_midi(path)
+        with self.lock:
+            self.notes = notes
+            self.duration = duration
+            self.playing = False
+            self.song_t = 0.0
+            self.cursor = 0
+            self.active.clear()
+        emit({"ev": "loaded", "duration": round(duration, 3),
+              "tracks": (max((n[4] for n in notes), default=-1) + 1),
+              "notes": notes})
+
+    def play(self):
+        with self.lock:
+            if self.notes:
+                self.playing = True
+
+    def pause(self):
+        with self.lock:
+            self.playing = False
+            self._all_off_locked()
+
+    def seek(self, t):
+        with self.lock:
+            self.song_t = max(0.0, min(t, self.duration))
+            self._all_off_locked()
+            self.cursor = 0
+            while self.cursor < len(self.notes) and self.notes[self.cursor][1] < self.song_t:
+                self.cursor += 1
+
+    def set_speed(self, v):
+        with self.lock:
+            self.speed = max(0.25, min(4.0, v))
+
+    def set_volume(self, v):
+        with self.lock:
+            self.volume = max(0.0, min(1.0, v))
+
+    def _all_off_locked(self):
+        for _off, voice in self.active:
+            self.sampler.release(voice)
+        self.active.clear()
+
+    # ---- audio thread -------------------------------------------------- #
+    def _audio_loop(self):
+        block_dt = BLOCK / SR
+        next_report = 0.0
+        while True:
+            with self.lock:
+                playing = self.playing
+                speed = self.speed
+                vol = self.volume
+                t = self.song_t
+                if playing:
+                    span_end = t + block_dt * speed
+                    while self.cursor < len(self.notes) and self.notes[self.cursor][1] <= span_end:
+                        midi, start, dur, vel, _trk = self.notes[self.cursor]
+                        voice = self.sampler.note_on(midi, vel)
+                        self.active.append((start + dur, voice))
+                        self.cursor += 1
+                    still = []
+                    for off, voice in self.active:
+                        if off <= span_end:
+                            self.sampler.release(voice)
+                        else:
+                            still.append((off, voice))
+                    self.active = still
+                    self.song_t = span_end
+                    if self.song_t >= self.duration + 1.0:
+                        self.playing = False
+                        emit({"ev": "end"})
+
+            block = self.sampler.render(BLOCK) * vol
+            stereo = self.sampler.np.repeat(block, CHANNELS)
+            try:
+                self.pw.stdin.write(stereo.astype("<f4").tobytes())
+                self.pw.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                self._start_pw()
+
+            now = time.monotonic()
+            if now >= next_report:
+                emit({"ev": "time", "t": round(self.song_t, 3), "playing": playing})
+                next_report = now + 0.025
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        emit({"ev": "error", "msg": "python-numpy is required: omarchy pkg add python-numpy"})
+        return
+    try:
+        engine = Engine()
+    except Exception as exc:  # noqa: BLE001
+        emit({"ev": "error", "msg": str(exc)})
+        return
+    emit({"ev": "ready"})
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        cmd = msg.get("cmd")
+        try:
+            if cmd == "load":
+                engine.load(msg["path"])
+            elif cmd == "play":
+                engine.play()
+            elif cmd == "pause":
+                engine.pause()
+            elif cmd == "seek":
+                engine.seek(float(msg["t"]))
+            elif cmd == "speed":
+                engine.set_speed(float(msg["v"]))
+            elif cmd == "volume":
+                engine.set_volume(float(msg["v"]))
+            elif cmd == "quit":
+                break
+        except Exception as exc:  # noqa: BLE001
+            emit({"ev": "error", "msg": "%s: %s" % (cmd, exc)})
+
+
+if __name__ == "__main__":
+    main()
