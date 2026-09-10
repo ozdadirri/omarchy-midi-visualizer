@@ -39,14 +39,16 @@ QtObject {
         if (proc.running) proc.signal(15);
     }
 
-    // Commands issued before the bridge finishes booting are queued and
-    // flushed once it emits "ready".
+    // Persistent-config commands issued before the bridge finishes booting are
+    // queued and flushed once it emits "ready". Transient commands (play/seek/…)
+    // are simply dropped while the bridge is down -- nothing to act on.
     property var _queue: []
+    readonly property var _queueable: ["load", "instrument"]
 
     function _send(obj) {
         if (proc.running && root.ready) {
             proc.write(JSON.stringify(obj) + "\n");
-        } else {
+        } else if (root._queueable.indexOf(obj.cmd) !== -1) {
             var q = root._queue.slice();
             q.push(obj);
             root._queue = q;

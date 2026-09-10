@@ -1,2 +1,6 @@
+# Namespaced qs.Commons for the standalone (quickshell -p standalone.qml) build,
+# which is its own Quickshell config and does not get the Omarchy shell's
+# Commons. When loaded as an Omarchy plugin the shell provides qs.Commons and
+# this directory is not on the import path.
 module qs.Commons
 singleton Style 1.0 Style.qml

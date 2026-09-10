@@ -1,37 +1,54 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.2.0
 
-- Initial scaffold.
-- `bin/midiviz-bridge`: minimal SMF parser, sampled-piano mixer (numpy → pw-play),
-  NDJSON stdio protocol, single-timeline playhead reporting, transport
-  (play/pause/seek/speed/volume).
-- QML overlay: `FallingNotes` and `Keyboard` canvases, `Transport` bar,
-  `BridgeController` process wrapper, bundled sample-song picker, split-hands
-  toggle, Space/Esc keys.
-- `install.sh` / `uninstall.sh`: managed `SUPER + ALT + M` binding.
+### Added
+
+- **Standalone window app** (`standalone.qml`) alongside the shell overlay — the
+  same visualizer in a normal `FloatingWindow` (move / resize / tile / alt-tab,
+  closed with the compositor's usual keybind). Shared UI lives in
+  `components/VisualizerStage.qml`; `Overlay.qml` and `standalone.qml` are thin
+  wrappers. `Commons/` stubs `qs.Commons.Style` for the app build.
+- **Instruments** — additive-synth voices in the bridge (Electric Piano, Music
+  Box, Pipe Organ, Synth Pad, Pluck, Sine) plus the sampled Grand Piano,
+  selectable from a header dropdown. Protocol: `{"cmd":"instrument","name":…}`;
+  the list ships in the `ready` event.
+- **Load MIDI…** (also `Ctrl+O`) — a built-in directory browser
+  (`components/FilePicker.qml`): folder navigation, quick-links, typed-path
+  field. A native `QtQuick.Dialogs.FileDialog` aborts this Quickshell build in a
+  layer-shell surface, so it is not used.
+- **↻ Restart** button; full-width draggable progress bar in the transport.
+- `install.sh [overlay|app|both]`, `uninstall.sh` symmetry, `~/.local/bin/midiviz`
+  launcher, and `MIDI Visualizer` / `MIDI Visualizer (Overlay)` menu entries.
+- Visual pass: glass header/transport bars, gradient backdrop with octave
+  guides, glowing rounded note bars, gradient piano keys with a red impact line,
+  taller keyboard.
+
+### Changed
+
+- Plugin id `dadirri.midiviz` → `ozdadirri.midiviz`; fixed the GitHub URL.
+- The bridge starts only when a song is loaded and is fully stopped (with its
+  `pw-play`) when the overlay closes or the window quits — nothing runs idle.
+- `install.sh` never installs packages or uses sudo; it only reports a missing
+  dependency and prints the `omarchy pkg add` command.
+
+### Fixed
+
+- Mixer: O(frames) linear interpolation instead of a per-block full-sample
+  `np.interp` — fixes slow / stuttering playback under polyphony (~8 % of one
+  core with heavy chords).
+- `Transport` `speedChanged`/`volumeChanged` signals collided with the
+  auto-generated property-change signals and broke QML loading — renamed.
+- Overlay `WlrKeyboardFocus.Exclusive` → `OnDemand`, plus an always-on `Escape`
+  shortcut and a Close button, so it can no longer trap the keyboard.
+- `Canvas.arcTo` radius guards in the keyboard/notes renderers.
+- `BridgeController` queues only persistent commands until `ready`.
+
+## 0.1.0
+
+- Initial release: minimal SMF parser, sampled-piano mixer (numpy → pw-play),
+  NDJSON stdio protocol, single-timeline playhead.
+- QML overlay: `FallingNotes` / `Keyboard` canvases, `Transport` bar,
+  `BridgeController`, bundled sample-song picker, split-hands toggle.
+- `install.sh` / `uninstall.sh` managed `SUPER + ALT + M` binding.
 - Tests for the MIDI parser and seek-cursor logic.
-
-## Unreleased fixes
-
-- Plugin id renamed `dadirri.midiviz` → `ozdadirri.midiviz`; corrected the
-  GitHub URL in the README.
-- Mixer: replaced the per-block full-sample `np.interp` with O(frames) linear
-  interpolation — fixes audio running slow / stuttering under polyphony.
-- `Transport`: renamed `speedChanged`/`volumeChanged` signals (they collided
-  with the auto-generated property-change signals and broke QML loading).
-- Overlay: `WlrKeyboardFocus.Exclusive` → `OnDemand` and an always-on `Escape`
-  shortcut plus a Close button, so the overlay can no longer trap the keyboard.
-- Falling notes: binary-search to the on-screen slice.
-- **Load MIDI…** button (also `Ctrl+O`) — a built-in directory browser
-  (`components/FilePicker.qml`) that walks the filesystem via `ls`, with
-  quick-links to Home/Downloads/Music/Desktop/Documents and a typed-path field.
-  A native `QtQuick.Dialogs.FileDialog` aborts this Quickshell build inside a
-  layer-shell surface, so it is not used. Added a **↻ Restart** button.
-- App-launcher entry (`midi-visualizer.desktop`) installed to
-  `~/.local/share/applications`, so it can be started from the menu like an app.
-- Transport: replaced the cramped seek slider with a full-width draggable
-  progress bar; click anywhere on it or drag the handle to scrub.
-- Visual pass: glass header/transport bars, gradient backdrop with octave guide
-  lines, glowing rounded note bars, polished gradient piano keys with a red
-  impact line, and a taller keyboard (~28 % of height).

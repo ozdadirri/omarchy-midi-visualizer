@@ -19,11 +19,12 @@ Rectangle {
         var p = ("" + path).replace(/^file:\/\//, "");
         songPath = p;
         songLabel = _basename(p);
-        bridge.start();
+        bridge.start();          // spawns the helper only when there's a song
         bridge.load(p);
     }
     function pauseBridge() { bridge.pause(); }
-    function focusStage() { keyCatcher.forceActiveFocus(); }
+    function stopBridge()  { bridge.stop(); }   // kill the helper + its audio
+    function focusStage()  { keyCatcher.forceActiveFocus(); }
 
     // ---- state ---------------------------------------------------------------
     property string songPath: ""
@@ -55,8 +56,7 @@ Rectangle {
     onSplitHandsChanged: rebuildDisplayNotes()
 
     Component.onCompleted: {
-        bridge.start();
-        if (initialPath !== "") loadSong(initialPath);
+        if (initialPath !== "") loadSong(initialPath);   // starts the bridge itself
         Qt.callLater(focusStage);
     }
     Component.onDestruction: bridge.stop()

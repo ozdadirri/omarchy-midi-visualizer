@@ -6,19 +6,16 @@
 #   ./install.sh app             # standalone window only      (app menu / `midiviz`)
 #   ./install.sh both
 #
-# Add --with-deps to install missing runtime packages via `omarchy pkg add`
-# without being asked; otherwise a terminal run offers to do it interactively.
-#
-# Safe to re-run. The overlay form backs up bindings.lua and only appends its
-# own block; the app form drops .desktop files and a `midiviz` launcher.
+# This script only edits your own config (bindings.lua, ~/.local). It never
+# installs packages or uses sudo -- if a runtime dependency is missing it prints
+# the `omarchy pkg add` command for you to run. Safe to re-run.
 set -euo pipefail
 
-mode="both"; auto_deps=false
+mode="both"
 for arg in "$@"; do
   case "$arg" in
     overlay|app|both) mode="$arg" ;;
-    --with-deps) auto_deps=true ;;
-    *) printf 'usage: %s [overlay|app|both] [--with-deps]\n' "$0" >&2; exit 2 ;;
+    *) printf 'usage: %s [overlay|app|both]\n' "$0" >&2; exit 2 ;;
   esac
 done
 want_overlay=false; want_app=false
@@ -39,28 +36,18 @@ if [[ ! -f "$plugin_dir/manifest.json" ]]; then
   exit 1
 fi
 
-# ---- runtime dependencies ------------------------------------------------
-# Map "what's missing" -> "pacman package". python3 / pw-play / quickshell ship
-# with a standard Omarchy install; in practice only python-numpy is ever absent.
+# ---- runtime dependency check (report only, never install) ---------------
+# python3 / pw-play / quickshell ship with a standard Omarchy install; in
+# practice only python-numpy is ever absent.
 missing_pkgs=()
 command -v ffmpeg   >/dev/null || missing_pkgs+=(ffmpeg)
 command -v python3  >/dev/null || missing_pkgs+=(python)
 command -v pw-play  >/dev/null || missing_pkgs+=(pipewire)
 python3 -c 'import numpy' 2>/dev/null || missing_pkgs+=(python-numpy)
-$want_app && ! command -v quickshell >/dev/null && missing_pkgs+=(quickshell)
+if $want_app && ! command -v quickshell >/dev/null; then missing_pkgs+=(quickshell); fi
 
 if ((${#missing_pkgs[@]})); then
-  printf 'Missing runtime packages: %s\n' "${missing_pkgs[*]}" >&2
-  do_install=$auto_deps
-  if ! $do_install && [[ -t 0 ]]; then
-    read -rp 'Install them now with `omarchy pkg add`? [y/N] ' reply
-    [[ "$reply" == [yY]* ]] && do_install=true
-  fi
-  if $do_install; then
-    omarchy pkg add "${missing_pkgs[@]}"
-  else
-    printf 'Skipping. Install manually:  omarchy pkg add %s\n' "${missing_pkgs[*]}" >&2
-  fi
+  printf 'Missing runtime dependency. Run:\n  omarchy pkg add %s\n' "${missing_pkgs[*]}" >&2
 fi
 
 mkdir -p "$apps_dir"

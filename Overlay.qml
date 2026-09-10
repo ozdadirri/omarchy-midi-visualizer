@@ -20,14 +20,17 @@ Item {
         var p = "";
         try { var o = JSON.parse(payloadJson || "{}"); p = o.path || ""; } catch (e) {}
         if (p) stage.loadSong(p);
+        else if (stage.songPath !== "") stage.loadSong(stage.songPath);   // restore last
         Qt.callLater(function () { stage.focusStage(); });
     }
 
-    function close() { opened = false; stage.pauseBridge(); }
+    // Closing fully stops the helper process (and its audio) so nothing runs
+    // while the overlay is hidden.
+    function close() { opened = false; stage.stopBridge(); }
 
     function dismiss() {
         opened = false;                       // drops the layer surface
-        stage.pauseBridge();
+        stage.stopBridge();
         if (shell && typeof shell.hide === "function") {
             try { shell.hide(root.pluginId); } catch (e) {}
         }
